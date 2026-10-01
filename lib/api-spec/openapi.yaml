@@ -3,13 +3,21 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Risk-first XRP market data, paper trading, and backtesting API.
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
-    description: Health operations
+    description: Application health and paper-trading readiness
+  - name: market
+    description: Public exchange market data
+  - name: trading
+    description: Authenticated paper trading, portfolio, and risk controls
+  - name: strategies
+    description: Authenticated strategy configuration
+  - name: backtests
+    description: Authenticated strategy backtesting
 paths:
   /healthz:
     get:
@@ -24,6 +32,439 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /ready:
+    get:
+      operationId: getReadiness
+      tags: [health]
+      summary: Check database and market-data readiness
+      responses:
+        "200":
+          description: Readiness details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessStatus"
+  /market/ticker:
+    get:
+      operationId: getMarketTicker
+      tags: [market]
+      summary: Get a current public ticker
+      parameters:
+        - in: query
+          name: symbol
+          required: false
+          schema:
+            type: string
+            default: XRP/USDT
+      responses:
+        "200":
+          description: Current ticker
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarketTicker"
+        "502":
+          description: Exchange market data unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /market/ohlcv:
+    get:
+      operationId: getMarketOhlcv
+      tags: [market]
+      summary: Get historical candles
+      parameters:
+        - in: query
+          name: symbol
+          required: false
+          schema:
+            type: string
+            default: XRP/USDT
+        - in: query
+          name: interval
+          required: false
+          schema:
+            type: string
+            enum: [1m, 5m, 15m, 1h, 4h, 1d]
+            default: 1h
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 30
+            maximum: 1000
+            default: 240
+      responses:
+        "200":
+          description: Candle series
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Candle"
+        "502":
+          description: Exchange market data unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /dashboard:
+    get:
+      operationId: getTradingDashboard
+      tags: [trading]
+      summary: Get an authenticated dashboard snapshot
+      responses:
+        "200":
+          description: Dashboard data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Dashboard"
+        "401":
+          description: Authentication required
+  /portfolio:
+    get:
+      operationId: getPortfolio
+      tags: [trading]
+      summary: Get the authenticated user's paper portfolio
+      responses:
+        "200":
+          description: Portfolio and open positions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Portfolio"
+        "401":
+          description: Authentication required
+  /positions:
+    get:
+      operationId: getPositions
+      tags: [trading]
+      summary: List open positions
+      responses:
+        "200":
+          description: Open positions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Position"
+  /orders:
+    get:
+      operationId: getOrders
+      tags: [trading]
+      summary: List recent paper orders
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+      responses:
+        "200":
+          description: Recent paper orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Order"
+  /trades:
+    get:
+      operationId: getTrades
+      tags: [trading]
+      summary: List closed paper trades
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+      responses:
+        "200":
+          description: Recent closed trades
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Trade"
+  /signals:
+    get:
+      operationId: getSignals
+      tags: [trading]
+      summary: List recent strategy signals and risk decisions
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+      responses:
+        "200":
+          description: Recent signals
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Signal"
+  /strategies:
+    get:
+      operationId: getStrategies
+      tags: [strategies]
+      summary: List the authenticated user's strategies
+      responses:
+        "200":
+          description: Strategy configurations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Strategy"
+    post:
+      operationId: createStrategy
+      tags: [strategies]
+      summary: Create a strategy configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StrategyInput"
+      responses:
+        "201":
+          description: Created strategy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Strategy"
+        "400":
+          description: Invalid strategy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /strategies/{id}:
+    put:
+      operationId: updateStrategy
+      tags: [strategies]
+      summary: Update a strategy configuration
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StrategyUpdate"
+      responses:
+        "200":
+          description: Updated strategy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Strategy"
+        "404":
+          description: Strategy not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /trading/status:
+    get:
+      operationId: getTradingStatus
+      tags: [trading]
+      summary: Get current trading engine status
+      responses:
+        "200":
+          description: Trading engine status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradingStatus"
+  /trading/start:
+    post:
+      operationId: startPaperTrading
+      tags: [trading]
+      summary: Start paper trading with a configured strategy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartTradingInput"
+      responses:
+        "200":
+          description: Trading started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradingStatus"
+        "409":
+          description: Risk or readiness checks prevent starting
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /trading/stop:
+    post:
+      operationId: stopPaperTrading
+      tags: [trading]
+      summary: Stop new paper orders while preserving open positions
+      responses:
+        "200":
+          description: Trading stopped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradingStatus"
+  /trading/emergency-stop:
+    post:
+      operationId: emergencyStopTrading
+      tags: [trading]
+      summary: Halt trading and prevent all new orders
+      responses:
+        "200":
+          description: Trading halted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradingStatus"
+  /risk/settings:
+    get:
+      operationId: getRiskSettings
+      tags: [trading]
+      summary: Get paper account and risk settings
+      responses:
+        "200":
+          description: Risk settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RiskSettings"
+    put:
+      operationId: updateRiskSettings
+      tags: [trading]
+      summary: Update paper account and risk settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RiskSettingsInput"
+      responses:
+        "200":
+          description: Updated settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RiskSettings"
+        "400":
+          description: Invalid risk settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /backtests:
+    get:
+      operationId: getBacktests
+      tags: [backtests]
+      summary: List recent backtests
+      responses:
+        "200":
+          description: Recent backtests
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BacktestSummary"
+    post:
+      operationId: runBacktest
+      tags: [backtests]
+      summary: Run a backtest on exchange historical candles
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BacktestInput"
+      responses:
+        "201":
+          description: Completed backtest with performance metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Backtest"
+        "400":
+          description: Invalid backtest request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Historical exchange data unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /backtests/{id}:
+    get:
+      operationId: getBacktest
+      tags: [backtests]
+      summary: Get a saved backtest and its performance metrics
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Backtest result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Backtest"
+        "404":
+          description: Backtest not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /paper-validation:
+    get:
+      operationId: getPaperValidation
+      tags: [health]
+      summary: Get the current paper-trading validation checklist
+      responses:
+        "200":
+          description: Validation results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaperValidation"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +474,336 @@ components:
           type: string
       required:
         - status
+    ErrorResponse:
+      type: object
+      properties:
+        error: { type: string }
+      required: [error]
+    ReadinessStatus:
+      type: object
+      properties:
+        status: { type: string, enum: [ready, degraded] }
+        database: { type: string, enum: [ok, unavailable] }
+        marketData: { type: string, enum: [ok, unavailable] }
+        tradingMode: { type: string, enum: [paper] }
+      required: [status, database, marketData, tradingMode]
+    Candle:
+      type: object
+      properties:
+        time: { type: string, format: date-time }
+        open: { type: number }
+        high: { type: number }
+        low: { type: number }
+        close: { type: number }
+        volume: { type: number }
+      required: [time, open, high, low, close, volume]
+    MarketTicker:
+      type: object
+      properties:
+        exchange: { type: string }
+        symbol: { type: string }
+        price: { type: number }
+        change24h: { type: number }
+        changePct24h: { type: number }
+        high24h: { type: number }
+        low24h: { type: number }
+        volume24h: { type: number }
+        updatedAt: { type: string, format: date-time }
+        stale: { type: boolean }
+      required: [exchange, symbol, price, change24h, changePct24h, high24h, low24h, volume24h, updatedAt, stale]
+    TradingStats:
+      type: object
+      properties:
+        totalTrades: { type: integer }
+        winRate: { type: number }
+        realizedPnl: { type: number }
+        feesPaid: { type: number }
+        maxDrawdownPct: { type: number }
+      required: [totalTrades, winRate, realizedPnl, feesPaid, maxDrawdownPct]
+    StrategyParams:
+      type: object
+      properties:
+        fastEma: { type: integer }
+        slowEma: { type: integer }
+        rsiPeriod: { type: integer }
+        rsiOversold: { type: number }
+        rsiOverbought: { type: number }
+        macdFast: { type: integer }
+        macdSlow: { type: integer }
+        macdSignal: { type: integer }
+        bollingerPeriod: { type: integer }
+        bollingerStdDev: { type: number }
+      required: [fastEma, slowEma, rsiPeriod, rsiOversold, rsiOverbought, macdFast, macdSlow, macdSignal, bollingerPeriod, bollingerStdDev]
+    Strategy:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        symbol: { type: string }
+        interval: { type: string, enum: [1m, 5m, 15m, 1h, 4h, 1d] }
+        type: { type: string, enum: [ema_crossover, rsi_reversion, macd, bollinger, combined] }
+        params: { $ref: "#/components/schemas/StrategyParams" }
+        stopLossPct: { type: number }
+        takeProfitPct: { type: number }
+        trailingStopPct: { type: ["number", "null"] }
+        maxPositionPct: { type: number }
+        maxDailyLossPct: { type: number }
+        maxTradesPerDay: { type: integer }
+        cooldownSeconds: { type: integer }
+        minConfidence: { type: number }
+        active: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [id, name, symbol, interval, type, params, stopLossPct, takeProfitPct, trailingStopPct, maxPositionPct, maxDailyLossPct, maxTradesPerDay, cooldownSeconds, minConfidence, active, createdAt, updatedAt]
+    StrategyInput:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        symbol: { type: string, minLength: 3, maxLength: 24 }
+        interval: { type: string, enum: [1m, 5m, 15m, 1h, 4h, 1d] }
+        type: { type: string, enum: [ema_crossover, rsi_reversion, macd, bollinger, combined] }
+        params: { $ref: "#/components/schemas/StrategyParams" }
+        stopLossPct: { type: number, exclusiveMinimum: 0, maximum: 25 }
+        takeProfitPct: { type: number, exclusiveMinimum: 0, maximum: 100 }
+        trailingStopPct: { type: ["number", "null"], minimum: 0, maximum: 25 }
+        maxPositionPct: { type: number, exclusiveMinimum: 0, maximum: 100 }
+        maxDailyLossPct: { type: number, exclusiveMinimum: 0, maximum: 100 }
+        maxTradesPerDay: { type: integer, minimum: 1, maximum: 1000 }
+        cooldownSeconds: { type: integer, minimum: 0, maximum: 86400 }
+        minConfidence: { type: number, minimum: 0, maximum: 1 }
+      required: [name, symbol, interval, type, params, stopLossPct, takeProfitPct, maxPositionPct, maxDailyLossPct, maxTradesPerDay, cooldownSeconds, minConfidence]
+    StrategyUpdate:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        symbol: { type: string, minLength: 3, maxLength: 24 }
+        interval: { type: string, enum: [1m, 5m, 15m, 1h, 4h, 1d] }
+        type: { type: string, enum: [ema_crossover, rsi_reversion, macd, bollinger, combined] }
+        params: { $ref: "#/components/schemas/StrategyParams" }
+        stopLossPct: { type: number, exclusiveMinimum: 0, maximum: 25 }
+        takeProfitPct: { type: number, exclusiveMinimum: 0, maximum: 100 }
+        trailingStopPct: { type: ["number", "null"], minimum: 0, maximum: 25 }
+        maxPositionPct: { type: number, exclusiveMinimum: 0, maximum: 100 }
+        maxDailyLossPct: { type: number, exclusiveMinimum: 0, maximum: 100 }
+        maxTradesPerDay: { type: integer, minimum: 1, maximum: 1000 }
+        cooldownSeconds: { type: integer, minimum: 0, maximum: 86400 }
+        minConfidence: { type: number, minimum: 0, maximum: 1 }
+        active: { type: boolean }
+    Position:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        symbol: { type: string }
+        quantity: { type: number }
+        entryPrice: { type: number }
+        markPrice: { type: number }
+        quoteValue: { type: number }
+        unrealizedPnl: { type: number }
+        unrealizedPnlPct: { type: number }
+        stopLossPrice: { type: number }
+        takeProfitPrice: { type: number }
+        openedAt: { type: string, format: date-time }
+        strategyName: { type: string }
+      required: [id, symbol, quantity, entryPrice, markPrice, quoteValue, unrealizedPnl, unrealizedPnlPct, stopLossPrice, takeProfitPrice, openedAt, strategyName]
+    Order:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        clientOrderId: { type: string }
+        symbol: { type: string }
+        side: { type: string, enum: [buy, sell] }
+        type: { type: string, enum: [market] }
+        quantity: { type: number }
+        price: { type: number }
+        fee: { type: number }
+        status: { type: string, enum: [filled, rejected] }
+        strategyName: { type: string }
+        createdAt: { type: string, format: date-time }
+      required: [id, clientOrderId, symbol, side, type, quantity, price, fee, status, strategyName, createdAt]
+    Trade:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        symbol: { type: string }
+        quantity: { type: number }
+        entryPrice: { type: number }
+        exitPrice: { type: number }
+        grossPnl: { type: number }
+        netPnl: { type: number }
+        fees: { type: number }
+        pnlPct: { type: number }
+        exitReason: { type: string }
+        strategyName: { type: string }
+        openedAt: { type: string, format: date-time }
+        closedAt: { type: string, format: date-time }
+      required: [id, symbol, quantity, entryPrice, exitPrice, grossPnl, netPnl, fees, pnlPct, exitReason, strategyName, openedAt, closedAt]
+    Signal:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        symbol: { type: string }
+        strategyName: { type: string }
+        side: { type: string, enum: [buy, sell, hold] }
+        confidence: { type: number }
+        price: { type: number }
+        message: { type: string }
+        riskApproved: { type: boolean }
+        rejectionReason: { type: ["string", "null"] }
+        createdAt: { type: string, format: date-time }
+      required: [id, symbol, strategyName, side, confidence, price, message, riskApproved, rejectionReason, createdAt]
+    TradingStatus:
+      type: object
+      properties:
+        mode: { type: string, enum: [paper] }
+        state: { type: string, enum: [stopped, running, halted] }
+        emergencyStop: { type: boolean }
+        activeStrategyId: { type: ["string", "null"], format: uuid }
+        liveTradingEnabled: { type: boolean, const: false }
+        lastMarketUpdate: { type: ["string", "null"], format: date-time }
+        message: { type: string }
+      required: [mode, state, emergencyStop, activeStrategyId, liveTradingEnabled, lastMarketUpdate, message]
+    StartTradingInput:
+      type: object
+      properties:
+        strategyId: { type: string, format: uuid }
+      required: [strategyId]
+    RiskSettings:
+      type: object
+      properties:
+        initialPaperBalance: { type: number }
+        availableBalance: { type: number }
+        riskPerTradePct: { type: number }
+        maxDailyLossPct: { type: number }
+        maxPositionPct: { type: number }
+        maxExposurePct: { type: number }
+        maxDrawdownPct: { type: number }
+        maxOpenPositions: { type: integer }
+        maxTradesPerDay: { type: integer }
+        feeBps: { type: number }
+        slippageBps: { type: number }
+      required: [initialPaperBalance, availableBalance, riskPerTradePct, maxDailyLossPct, maxPositionPct, maxExposurePct, maxDrawdownPct, maxOpenPositions, maxTradesPerDay, feeBps, slippageBps]
+    RiskSettingsInput:
+      type: object
+      properties:
+        riskPerTradePct: { type: number, exclusiveMinimum: 0, maximum: 5 }
+        maxDailyLossPct: { type: number, exclusiveMinimum: 0, maximum: 100 }
+        maxPositionPct: { type: number, exclusiveMinimum: 0, maximum: 100 }
+        maxExposurePct: { type: number, exclusiveMinimum: 0, maximum: 100 }
+        maxDrawdownPct: { type: number, exclusiveMinimum: 0, maximum: 100 }
+        maxOpenPositions: { type: integer, minimum: 1, maximum: 10 }
+        maxTradesPerDay: { type: integer, minimum: 1, maximum: 1000 }
+        feeBps: { type: number, minimum: 0, maximum: 100 }
+        slippageBps: { type: number, minimum: 0, maximum: 100 }
+      required: [riskPerTradePct, maxDailyLossPct, maxPositionPct, maxExposurePct, maxDrawdownPct, maxOpenPositions, maxTradesPerDay, feeBps, slippageBps]
+    Portfolio:
+      type: object
+      properties:
+        mode: { type: string, enum: [paper] }
+        quoteCurrency: { type: string }
+        initialBalance: { type: number }
+        availableBalance: { type: number }
+        equity: { type: number }
+        realizedPnl: { type: number }
+        unrealizedPnl: { type: number }
+        dayPnl: { type: number }
+        openPositions:
+          type: array
+          items: { $ref: "#/components/schemas/Position" }
+      required: [mode, quoteCurrency, initialBalance, availableBalance, equity, realizedPnl, unrealizedPnl, dayPnl, openPositions]
+    Dashboard:
+      type: object
+      properties:
+        ticker: { $ref: "#/components/schemas/MarketTicker" }
+        portfolio: { $ref: "#/components/schemas/Portfolio" }
+        trading: { $ref: "#/components/schemas/TradingStatus" }
+        stats: { $ref: "#/components/schemas/TradingStats" }
+        activeStrategy: { anyOf: [{ $ref: "#/components/schemas/Strategy" }, { type: "null" }] }
+        recentTrades:
+          type: array
+          items: { $ref: "#/components/schemas/Trade" }
+        recentSignals:
+          type: array
+          items: { $ref: "#/components/schemas/Signal" }
+      required: [ticker, portfolio, trading, stats, activeStrategy, recentTrades, recentSignals]
+    BacktestInput:
+      type: object
+      properties:
+        strategyId: { type: string, format: uuid }
+        symbol: { type: string }
+        interval: { type: string, enum: [1m, 5m, 15m, 1h, 4h, 1d] }
+        days: { type: integer, minimum: 1, maximum: 365 }
+        initialCapital: { type: number, exclusiveMinimum: 0, maximum: 1000000000 }
+        feeBps: { type: number, minimum: 0, maximum: 100 }
+        slippageBps: { type: number, minimum: 0, maximum: 100 }
+      required: [strategyId, symbol, interval, days, initialCapital, feeBps, slippageBps]
+    EquityPoint:
+      type: object
+      properties:
+        time: { type: string, format: date-time }
+        equity: { type: number }
+      required: [time, equity]
+    BacktestSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        symbol: { type: string }
+        interval: { type: string }
+        strategyName: { type: string }
+        totalReturnPct: { type: number }
+        netProfit: { type: number }
+        winRate: { type: number }
+        profitFactor: { type: ["number", "null"] }
+        maxDrawdownPct: { type: number }
+        tradeCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+      required: [id, symbol, interval, strategyName, totalReturnPct, netProfit, winRate, profitFactor, maxDrawdownPct, tradeCount, createdAt]
+    BacktestTrade:
+      type: object
+      properties:
+        entryTime: { type: string, format: date-time }
+        exitTime: { type: string, format: date-time }
+        entryPrice: { type: number }
+        exitPrice: { type: number }
+        netPnl: { type: number }
+        pnlPct: { type: number }
+        exitReason: { type: string }
+      required: [entryTime, exitTime, entryPrice, exitPrice, netPnl, pnlPct, exitReason]
+    Backtest:
+      allOf:
+        - $ref: "#/components/schemas/BacktestSummary"
+        - type: object
+          properties:
+            grossProfit: { type: number }
+            grossLoss: { type: number }
+            lossRate: { type: number }
+            sharpeRatio: { type: number }
+            sortinoRatio: { type: ["number", "null"] }
+            averageTrade: { type: number }
+            averageWin: { type: ["number", "null"] }
+            averageLoss: { type: ["number", "null"] }
+            largestWin: { type: number }
+            largestLoss: { type: number }
+            equityCurve:
+              type: array
+              items: { $ref: "#/components/schemas/EquityPoint" }
+            trades:
+              type: array
+              items: { $ref: "#/components/schemas/BacktestTrade" }
+          required: [grossProfit, grossLoss, lossRate, sharpeRatio, sortinoRatio, averageTrade, averageWin, averageLoss, largestWin, largestLoss, equityCurve, trades]
+    PaperValidationCheck:
+      type: object
+      properties:
+        id: { type: string }
+        label: { type: string }
+        status: { type: string, enum: [passed, pending, blocked] }
+        detail: { type: string }
+      required: [id, label, status, detail]
+    PaperValidation:
+      type: object
+      properties:
+        checks:
+          type: array
+          items: { $ref: "#/components/schemas/PaperValidationCheck" }
+        liveTradingEnabled: { type: boolean, const: false }
+      required: [checks, liveTradingEnabled]
 

@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "XRP Quant"
+description = "A risk-first XRP trading platform for monitoring live market data, configuring strategies, paper trading, and evaluating backtests. Live execution is disabled by default and guarded by explicit risk controls."
+version = "1.0.0"
+id = "artifacts/xrp-trading"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 24546
+
+[services.development]
+run = "pnpm --filter @workspace/xrp-trading run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/xrp-trading", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/xrp-trading/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "24546"
+BASE_PATH = "/"

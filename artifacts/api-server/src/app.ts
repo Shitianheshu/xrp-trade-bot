@@ -16,6 +16,10 @@ import { apiRateLimit } from "./middlewares/rate-limit";
 import router from "./routes";
 import { logger } from "./lib/logger";
 
+if ((process.env.TRADING_MODE ?? "paper").toLowerCase() !== "paper") {
+  throw new Error("This application only supports paper trading.");
+}
+
 const app: Express = express();
 app.set("trust proxy", 1);
 

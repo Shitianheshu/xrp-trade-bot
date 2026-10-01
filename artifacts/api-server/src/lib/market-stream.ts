@@ -15,17 +15,30 @@ const pairPattern = /^([A-Z0-9]{2,14})\/(USDT|USDC|USD|BTC|ETH|JPY)$/;
 function parseTicker(raw: RawData, symbol: string) {
   const event = JSON.parse(raw.toString()) as Record<string, unknown>;
   const price = Number(event.c);
+  const change24h = Number(event.p);
+  const changePct24h = Number(event.P);
+  const high24h = Number(event.h);
+  const low24h = Number(event.l);
+  const volume24h = Number(event.v);
   const eventTime = Number(event.E);
-  if (!Number.isFinite(price) || !Number.isFinite(eventTime)) return null;
+  if (
+    !Number.isFinite(price) ||
+    !Number.isFinite(change24h) ||
+    !Number.isFinite(changePct24h) ||
+    !Number.isFinite(high24h) ||
+    !Number.isFinite(low24h) ||
+    !Number.isFinite(volume24h) ||
+    !Number.isFinite(eventTime)
+  ) return null;
   return {
     exchange: "binance",
     symbol,
     price,
-    change24h: Number(event.p),
-    changePct24h: Number(event.P),
-    high24h: Number(event.h),
-    low24h: Number(event.l),
-    volume24h: Number(event.v),
+    change24h,
+    changePct24h,
+    high24h,
+    low24h,
+    volume24h,
     updatedAt: new Date(eventTime).toISOString(),
     stale: Date.now() - eventTime > 60_000,
   };
@@ -60,7 +73,6 @@ export function installMarketStream(server: Server): void {
 
   streamServer.on("connection", (client, request) => {
     const ip = request.socket.remoteAddress ?? "unknown";
-    perIp.set(ip, (perIp.get(ip) ?? 0) + 1);
     const url = new URL(
       request.url ?? "/",
       `http://${request.headers.host ?? "localhost"}`,
@@ -71,11 +83,18 @@ export function installMarketStream(server: Server): void {
       client.close(1008, "Unsupported market-data pair or exchange");
       return;
     }
+    perIp.set(ip, (perIp.get(ip) ?? 0) + 1);
 
     let upstream: WebSocket | undefined;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let attempts = 0;
     let disposed = false;
+    let released = false;
+    const releaseClientSlot = () => {
+      if (released) return;
+      released = true;
+      perIp.set(ip, Math.max(0, (perIp.get(ip) ?? 1) - 1));
+    };
 
     const connect = () => {
       if (disposed || client.readyState !== WebSocket.OPEN) return;
@@ -113,12 +132,13 @@ export function installMarketStream(server: Server): void {
       disposed = true;
       if (retryTimer) clearTimeout(retryTimer);
       upstream?.close();
-      perIp.set(ip, Math.max(0, (perIp.get(ip) ?? 1) - 1));
+      releaseClientSlot();
     });
     client.on("error", () => {
       disposed = true;
       if (retryTimer) clearTimeout(retryTimer);
       upstream?.terminate();
+      releaseClientSlot();
     });
     connect();
   });

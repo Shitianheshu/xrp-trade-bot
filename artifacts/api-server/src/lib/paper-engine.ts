@@ -30,6 +30,20 @@ const utcDayStart = (): Date => {
 const deterministicId = (value: string): string =>
   createHash("sha256").update(value).digest("hex");
 
+async function freshPositionPrice(
+  symbol: string,
+  preferredSymbol: string,
+  preferredPrice: number,
+  adapter = getExchangeAdapter(),
+): Promise<number> {
+  if (symbol === preferredSymbol) return preferredPrice;
+  const ticker = await adapter.ticker(symbol);
+  if (ticker.stale || Date.now() - Date.parse(ticker.updatedAt) > 60_000) {
+    throw new Error(`Market data for open position ${symbol} is stale.`);
+  }
+  return ticker.price;
+}
+
 function asMathStrategy(strategy: typeof strategiesTable.$inferSelect): MathStrategy {
   return {
     type: strategy.type as MathStrategy["type"],
@@ -77,7 +91,7 @@ async function assessEntry(
   }
   const today = utcDayStart();
   const todayEntries = await db
-    .select()
+    .select({ id: paperOrdersTable.id })
     .from(paperOrdersTable)
     .where(
       and(
@@ -86,15 +100,31 @@ async function assessEntry(
         gte(paperOrdersTable.createdAt, today),
       ),
     );
+  const todayStrategyEntries = await db
+    .select({ id: paperOrdersTable.id })
+    .from(paperOrdersTable)
+    .where(
+      and(
+        eq(paperOrdersTable.userId, userId),
+        eq(paperOrdersTable.strategyId, strategy.id),
+        eq(paperOrdersTable.side, "buy"),
+        gte(paperOrdersTable.createdAt, today),
+      ),
+    );
   if (todayEntries.length >= account.maxTradesPerDay ||
-      todayEntries.length >= strategy.maxTradesPerDay) {
+      todayStrategyEntries.length >= strategy.maxTradesPerDay) {
     return reject("Maximum daily order count reached.");
   }
 
   const [lastOrder] = await db
     .select()
     .from(paperOrdersTable)
-    .where(eq(paperOrdersTable.userId, userId))
+    .where(
+      and(
+        eq(paperOrdersTable.userId, userId),
+        eq(paperOrdersTable.strategyId, strategy.id),
+      ),
+    )
     .orderBy(desc(paperOrdersTable.createdAt))
     .limit(1);
   if (
@@ -125,9 +155,7 @@ async function assessEntry(
   const adapter = getExchangeAdapter();
   const openMarks = await Promise.all(
     openPositions.map(async (position) =>
-      position.symbol === strategy.symbol
-        ? price
-        : (await adapter.ticker(position.symbol)).price,
+      freshPositionPrice(position.symbol, strategy.symbol, price, adapter),
     ),
   );
   const openNotional = openPositions.reduce(
@@ -393,7 +421,13 @@ async function runUserCycle(userId: string): Promise<void> {
         .where(eq(tradingAccountsTable.userId, userId));
     }
     for (const position of open) {
-      const high = Math.max(position.highestPrice, ticker.price);
+      const positionPrice = await freshPositionPrice(
+        position.symbol,
+        strategy.symbol,
+        ticker.price,
+        exchange,
+      );
+      const high = Math.max(position.highestPrice, positionPrice);
       const trailingStop =
         strategy.trailingStopPct !== null && strategy.trailingStopPct > 0
           ? high * (1 - strategy.trailingStopPct / 100)
@@ -403,14 +437,14 @@ async function runUserCycle(userId: string): Promise<void> {
         .update(paperPositionsTable)
         .set({ highestPrice: high, stopLossPrice: stop })
         .where(eq(paperPositionsTable.id, position.id));
-      if (ticker.price <= stop) {
+      if (positionPrice <= stop) {
         await closePaperPosition(
           userId,
           { ...position, highestPrice: high, stopLossPrice: stop },
-          stop,
+          Math.min(positionPrice, stop),
           trailingStop > position.stopLossPrice ? "trailing_stop" : "stop_loss",
         );
-      } else if (ticker.price >= position.takeProfitPrice) {
+      } else if (positionPrice >= position.takeProfitPrice) {
         await closePaperPosition(userId, position, position.takeProfitPrice, "take_profit");
       }
     }
@@ -434,13 +468,18 @@ async function runUserCycle(userId: string): Promise<void> {
           gte(paperTradesTable.closedAt, today),
         ),
       );
+    const unrealizedToday = await Promise.all(remainingBeforeSignal.map(async (position) => {
+      const mark = await freshPositionPrice(
+        position.symbol,
+        strategy.symbol,
+        ticker.price,
+        exchange,
+      );
+      return (mark - position.entryPrice) * position.quantity - position.entryFee;
+    }));
     const dayPnl =
       closedToday.reduce((sum, trade) => sum + trade.netPnl, 0) +
-      remainingBeforeSignal.reduce(
-        (sum, position) =>
-          sum + (ticker.price - position.entryPrice) * position.quantity - position.entryFee,
-        0,
-      );
+      unrealizedToday.reduce((sum, pnl) => sum + pnl, 0);
     const dailyLossPct = latestAccount.dayStartBalance > 0
       ? Math.max(0, -dayPnl / latestAccount.dayStartBalance * 100)
       : 100;
@@ -505,10 +544,16 @@ async function runUserCycle(userId: string): Promise<void> {
       .select()
       .from(paperPositionsTable)
       .where(eq(paperPositionsTable.userId, userId));
-    const openNotional = remaining.reduce(
-      (sum, position) => sum + position.quantity * (position.symbol === strategy.symbol ? ticker.price : position.entryPrice),
-      0,
-    );
+    const markedNotional = await Promise.all(remaining.map(async (position) => {
+      const mark = await freshPositionPrice(
+        position.symbol,
+        strategy.symbol,
+        ticker.price,
+        exchange,
+      );
+      return position.quantity * mark;
+    }));
+    const openNotional = markedNotional.reduce((sum, value) => sum + value, 0);
     const [currentAccount] = await db
       .select()
       .from(tradingAccountsTable)
@@ -556,7 +601,9 @@ export async function startPaperTrading(userId: string, strategyId: string) {
     exchange.ticker(strategy.symbol),
     exchange.candles(strategy.symbol, strategy.interval, 240),
   ]);
-  if (ticker.stale) throw new Error("Market data is stale; paper trading was not started.");
+  if (ticker.stale || Date.now() - Date.parse(ticker.updatedAt) > 60_000) {
+    throw new Error("Market data is stale; paper trading was not started.");
+  }
   if (candles.length < Math.max(strategy.params.slowEma, strategy.params.bollingerPeriod) + 5) {
     throw new Error("Not enough complete candles to initialize this strategy.");
   }
@@ -567,12 +614,11 @@ export async function startPaperTrading(userId: string, strategyId: string) {
     .select()
     .from(paperPositionsTable)
     .where(eq(paperPositionsTable.userId, userId));
-  const equity = account.availableBalance + positions.reduce(
-    (sum, position) =>
-      sum + position.quantity *
-        (position.symbol === strategy.symbol ? ticker.price : position.entryPrice),
-    0,
-  );
+  const positionMarks = await Promise.all(positions.map(async (position) => {
+    const mark = await freshPositionPrice(position.symbol, strategy.symbol, ticker.price, exchange);
+    return position.quantity * mark;
+  }));
+  const equity = account.availableBalance + positionMarks.reduce((sum, value) => sum + value, 0);
   const drawdownPct = account.highWaterMark > 0
     ? Math.max(0, (account.highWaterMark - equity) / account.highWaterMark * 100)
     : 100;
@@ -589,12 +635,18 @@ export async function startPaperTrading(userId: string, strategyId: string) {
       ),
     );
   const realizedToday = closedToday.reduce((sum, trade) => sum + trade.netPnl, 0);
+  const unrealizedToday = positions.reduce(
+    (sum, position, index) =>
+      sum + (positionMarks[index] - position.entryPrice * position.quantity) - position.entryFee,
+    0,
+  );
   const dayStartBalance = account.dayStartedAt < utcDayStart()
     ? equity
     : account.dayStartBalance;
   if (
     dayStartBalance > 0 &&
-    -realizedToday / dayStartBalance * 100 >= account.maxDailyLossPct
+    -(realizedToday + unrealizedToday) / dayStartBalance * 100 >=
+      Math.min(account.maxDailyLossPct, strategy.maxDailyLossPct)
   ) {
     throw new Error("Daily loss limit is reached; paper trading was not started.");
   }

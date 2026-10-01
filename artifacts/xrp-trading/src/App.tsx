@@ -303,7 +303,7 @@ function Home() {
         </Panel>
       </section>
       <section id="market" className="border-y border-border py-7">
-        <div className="flex flex-wrap items-center justify-between gap-4"><div><div className="eyebrow">Public market feed</div><p className="mt-1 text-sm font-semibold">XRPUSDT <span className="font-normal text-muted-foreground">· {market?.exchange ?? 'Exchange'} · updated {market ? dateTime(market.updatedAt) : '—'}</span></p></div><div className="flex gap-1 rounded-md border border-border bg-card p-1">{(['15m', '1h', '4h', '1d'] as const).map(item => <button key={item} onClick={() => setInterval(item)} className={cx('rounded px-3 py-1.5 font-mono-data text-[11px]', interval === item ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground')} data-testid={`button-interval-${item}`}>{item}</button>)}</div></div>
+        <div className="flex flex-wrap items-center justify-between gap-4"><div><div className="eyebrow">Public market feed</div><p className="mt-1 text-sm font-semibold">XRP/USDT <span className="font-normal text-muted-foreground">· {market?.exchange ?? 'Exchange'} · updated {market ? dateTime(market.updatedAt) : '—'}</span></p></div><div className="flex gap-1 rounded-md border border-border bg-card p-1">{(['15m', '1h', '4h', '1d'] as const).map(item => <button key={item} onClick={() => setInterval(item)} className={cx('rounded px-3 py-1.5 font-mono-data text-[11px]', interval === item ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground')} data-testid={`button-interval-${item}`}>{item}</button>)}</div></div>
         {(health.data || readiness.data) && <div className="mt-4 flex flex-wrap gap-4 text-[10px] text-muted-foreground"><span className="inline-flex items-center gap-1.5"><span className={cx('h-1.5 w-1.5 rounded-full', health.data?.status === 'ok' ? 'bg-primary' : 'bg-amber-500')} />API {health.data?.status ?? 'checking'}</span><span className="inline-flex items-center gap-1.5"><span className={cx('h-1.5 w-1.5 rounded-full', ready ? 'bg-primary' : 'bg-amber-500')} />Market data {readiness.data?.marketData ?? 'checking'}</span><span className="inline-flex items-center gap-1.5"><LockKeyhole size={11} />Execution mode paper-only</span></div>}
       </section>
       <section id="method" className="grid gap-10 py-14 md:grid-cols-[.7fr_1.3fr] md:py-20">
@@ -436,6 +436,18 @@ const strategyNumericFields: { key: keyof StrategyInput; label: string; suffix?:
   { key: 'maxDailyLossPct', label: 'Daily loss cap', suffix: '%', step: '.1' }, { key: 'maxTradesPerDay', label: 'Trades / day', step: '1' },
   { key: 'cooldownSeconds', label: 'Cooldown', suffix: 'sec', step: '1' }, { key: 'minConfidence', label: 'Min confidence', step: '.01' },
 ];
+const indicatorFields: { key: keyof StrategyInput['params']; label: string; min: number; max: number; step?: string }[] = [
+  { key: 'fastEma', label: 'Fast EMA', min: 2, max: 200 },
+  { key: 'slowEma', label: 'Slow EMA', min: 3, max: 500 },
+  { key: 'rsiPeriod', label: 'RSI period', min: 2, max: 100 },
+  { key: 'rsiOversold', label: 'RSI oversold', min: 1, max: 49 },
+  { key: 'rsiOverbought', label: 'RSI overbought', min: 51, max: 99 },
+  { key: 'macdFast', label: 'MACD fast', min: 2, max: 100 },
+  { key: 'macdSlow', label: 'MACD slow', min: 3, max: 200 },
+  { key: 'macdSignal', label: 'MACD signal', min: 2, max: 100 },
+  { key: 'bollingerPeriod', label: 'Bollinger period', min: 5, max: 200 },
+  { key: 'bollingerStdDev', label: 'Bollinger deviation', min: 0.1, max: 5, step: '.1' },
+];
 function StrategyDialog({ strategy, onClose }: { strategy?: Strategy; onClose: () => void }) {
   const queryClient = useQueryClient();
   const create = useCreateStrategy({ mutation: { onSuccess: () => {
@@ -455,6 +467,9 @@ function StrategyDialog({ strategy, onClose }: { strategy?: Strategy; onClose: (
   } : strategyDefaults);
   const busy = create.isPending || update.isPending;
   function field<K extends keyof StrategyInput>(key: K, value: StrategyInput[K]) { setForm(v => ({ ...v, [key]: value })); }
+  function paramField<K extends keyof StrategyInput['params']>(key: K, value: StrategyInput['params'][K]) {
+    setForm(v => ({ ...v, params: { ...v.params, [key]: value } }));
+  }
   function submit(e: FormEvent) {
     e.preventDefault();
     if (strategy) update.mutate({ id: strategy.id, data: form }, { onSuccess: onClose });
@@ -468,9 +483,11 @@ function StrategyDialog({ strategy, onClose }: { strategy?: Strategy; onClose: (
         <label className="space-y-1.5"><span className="eyebrow">Symbol</span><input required value={form.symbol} onChange={e => field('symbol', e.target.value.toUpperCase())} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono-data text-sm" data-testid="input-strategy-symbol" /></label>
         <label className="space-y-1.5"><span className="eyebrow">Interval</span><select value={form.interval} onChange={e => field('interval', e.target.value as StrategyInput['interval'])} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" data-testid="select-strategy-interval">{['1m', '5m', '15m', '1h', '4h', '1d'].map(v => <option key={v}>{v}</option>)}</select></label>
         <label className="space-y-1.5 sm:col-span-2"><span className="eyebrow">Signal model</span><select value={form.type} onChange={e => field('type', e.target.value as StrategyInput['type'])} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" data-testid="select-strategy-type">{[['ema_crossover', 'EMA crossover'], ['rsi_reversion', 'RSI reversion'], ['macd', 'MACD'], ['bollinger', 'Bollinger bands'], ['combined', 'Combined indicators']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
+        <div className="eyebrow sm:col-span-2">Indicator parameters</div>
+        {indicatorFields.map(item => <label key={item.key} className="space-y-1.5"><span className="eyebrow">{item.label}</span><input type="number" required min={item.min} max={item.max} step={item.step ?? 1} value={form.params[item.key]} onChange={e => paramField(item.key, Number(e.target.value))} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono-data text-sm" data-testid={`input-indicator-${item.key}`} /></label>)}
         <div className="eyebrow sm:col-span-2">Risk controls and limits</div>
         {strategyNumericFields.map(item => <label key={item.key} className="space-y-1.5"><span className="eyebrow">{item.label}</span><div className="relative"><input type="number" min={item.key === 'minConfidence' || item.key === 'trailingStopPct' ? 0 : 0.01} max={item.key === 'minConfidence' ? 1 : item.key === 'maxTradesPerDay' ? 1000 : item.key === 'cooldownSeconds' ? 86400 : 100} step={item.step ?? 'any'} value={form[item.key] == null ? '' : String(form[item.key])} onChange={e => field(item.key, (e.target.value === '' && item.key === 'trailingStopPct' ? null : Number(e.target.value)) as never)} className="h-10 w-full rounded-md border border-input bg-background px-3 pr-10 font-mono-data text-sm" data-testid={`input-${String(item.key)}`} />{item.suffix && <span className="absolute right-3 top-3 text-[10px] text-muted-foreground">{item.suffix}</span>}</div></label>)}
-        <p className="text-[11px] leading-5 text-muted-foreground sm:col-span-2">Indicator parameters retain the API defaults. Risk limits are always applied before paper execution.</p>
+        <p className="text-[11px] leading-5 text-muted-foreground sm:col-span-2">Indicator periods and thresholds are stored with this strategy. EMA and MACD fast periods must remain below their slow periods.</p>
         {(create.error || update.error) && <p className="text-xs text-destructive sm:col-span-2">Could not save this strategy. Check field limits and retry.</p>}
       </div>
       <div className="flex justify-end gap-2 border-t border-border bg-muted/30 px-5 py-4"><Button type="button" variant="outline" onClick={onClose}>Cancel</Button><Button type="submit" disabled={busy} data-testid="button-save-strategy">{busy ? 'Saving…' : strategy ? 'Save changes' : 'Create strategy'}</Button></div>

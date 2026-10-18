@@ -1,9 +1,5 @@
 import { Router, type IRouter } from "express";
-import { sql } from "drizzle-orm";
-import {
-  db,
-  marketCandlesTable,
-} from "@workspace/db";
+import { candles, pingDatabase } from "@workspace/db";
 import {
   GetMarketOhlcvQueryParams,
   GetMarketOhlcvResponse,
@@ -22,7 +18,7 @@ router.get("/ready", async (_req, res): Promise<void> => {
   let database: "ok" | "unavailable" = "ok";
   let marketData: "ok" | "unavailable" = "ok";
   try {
-    await db.execute(sql`select 1`);
+    await pingDatabase();
   } catch {
     database = "unavailable";
   }
@@ -70,40 +66,23 @@ router.get("/market/ohlcv", async (req, res): Promise<void> => {
   try {
     const { symbol, interval, limit } = query.data;
     const exchange = getExchangeAdapter();
-    const candles = await exchange.candles(symbol, interval, limit);
-    if (candles.length) {
-      await db
-        .insert(marketCandlesTable)
-        .values(
-          candles.map((candle) => ({
-            exchange: exchange.id,
-            symbol,
-            interval,
-            time: new Date(candle.time),
-            open: candle.open,
-            high: candle.high,
-            low: candle.low,
-            close: candle.close,
-            volume: candle.volume,
-          })),
-        )
-        .onConflictDoUpdate({
-          target: [
-            marketCandlesTable.exchange,
-            marketCandlesTable.symbol,
-            marketCandlesTable.interval,
-            marketCandlesTable.time,
-          ],
-          set: {
-            open: sql`excluded.open`,
-            high: sql`excluded.high`,
-            low: sql`excluded.low`,
-            close: sql`excluded.close`,
-            volume: sql`excluded.volume`,
-          },
-        });
+    const rows = await exchange.candles(symbol, interval, limit);
+    if (rows.length) {
+      await candles.upsertMany(
+        rows.map((candle) => ({
+          exchange: exchange.id,
+          symbol,
+          interval,
+          time: new Date(candle.time),
+          open: candle.open,
+          high: candle.high,
+          low: candle.low,
+          close: candle.close,
+          volume: candle.volume,
+        })),
+      );
     }
-    res.json(GetMarketOhlcvResponse.parse(candles));
+    res.json(GetMarketOhlcvResponse.parse(rows));
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Market data unavailable.";

@@ -1,5 +1,6 @@
 import { getAuth } from "@clerk/express";
 import type { NextFunction, Request, Response } from "express";
+import { clerkConfigured } from "./require-auth";
 
 type Bucket = { count: number; resetAt: number };
 const buckets = new Map<string, Bucket>();
@@ -24,7 +25,9 @@ export function apiRateLimit(
     req.originalUrl.startsWith("/api/market/") ||
     req.path.startsWith("/market/");
   const limit = isPublicMarket ? PUBLIC_MARKET_LIMIT : USER_LIMIT;
-  const principal = getAuth(req).userId ?? req.ip ?? "unknown";
+  const principal = clerkConfigured()
+    ? (getAuth(req).userId ?? req.ip ?? "unknown")
+    : (req.ip ?? "local");
   const key = `${isPublicMarket ? "market" : "api"}:${principal}`;
   const now = Date.now();
   let bucket = buckets.get(key);

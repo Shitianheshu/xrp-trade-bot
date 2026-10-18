@@ -1,4 +1,3 @@
-import { and, asc, eq } from "drizzle-orm";
 import { Router, type IRouter } from "express";
 import {
   CreateStrategyBody,
@@ -8,7 +7,7 @@ import {
   UpdateStrategyParams,
   UpdateStrategyResponse,
 } from "@workspace/api-zod";
-import { db, strategiesTable, tradingAccountsTable } from "@workspace/db";
+import { accounts, strategies, type StrategyRecord } from "@workspace/db";
 import {
   authenticatedUserId,
   requireAuth,
@@ -18,7 +17,7 @@ import { ensureUserAccount } from "../lib/trading-store";
 const router: IRouter = Router();
 router.use(requireAuth);
 
-function serializeStrategy(strategy: typeof strategiesTable.$inferSelect) {
+function serializeStrategy(strategy: StrategyRecord) {
   return {
     ...strategy,
     createdAt: strategy.createdAt.toISOString(),
@@ -26,18 +25,7 @@ function serializeStrategy(strategy: typeof strategiesTable.$inferSelect) {
   };
 }
 
-type IndicatorParams = {
-  fastEma: number;
-  slowEma: number;
-  rsiPeriod: number;
-  rsiOversold: number;
-  rsiOverbought: number;
-  macdFast: number;
-  macdSlow: number;
-  macdSignal: number;
-  bollingerPeriod: number;
-  bollingerStdDev: number;
-};
+type IndicatorParams = StrategyRecord["params"];
 
 function invalidIndicatorParams(params: IndicatorParams): string | null {
   if (params.fastEma >= params.slowEma) return "Fast EMA must be shorter than slow EMA.";
@@ -49,12 +37,8 @@ function invalidIndicatorParams(params: IndicatorParams): string | null {
 router.get("/strategies", async (_req, res): Promise<void> => {
   const userId = authenticatedUserId(res);
   await ensureUserAccount(userId);
-  const strategies = await db
-    .select()
-    .from(strategiesTable)
-    .where(eq(strategiesTable.userId, userId))
-    .orderBy(asc(strategiesTable.createdAt));
-  res.json(GetStrategiesResponse.parse(strategies.map(serializeStrategy)));
+  const rows = await strategies.listByUser(userId);
+  res.json(GetStrategiesResponse.parse(rows.map(serializeStrategy)));
 });
 
 router.post("/strategies", async (req, res): Promise<void> => {
@@ -70,10 +54,11 @@ router.post("/strategies", async (req, res): Promise<void> => {
     return;
   }
   await ensureUserAccount(userId);
-  const [strategy] = await db
-    .insert(strategiesTable)
-    .values({ ...body.data, userId })
-    .returning();
+  const strategy = await strategies.insert({ ...body.data, userId, trailingStopPct: body.data.trailingStopPct ?? null });
+  if (!strategy) {
+    res.status(409).json({ error: "A strategy with that name already exists." });
+    return;
+  }
   res.status(201).json(CreateStrategyResponse.parse(serializeStrategy(strategy)));
 });
 
@@ -96,85 +81,42 @@ router.put("/strategies/:id", async (req, res): Promise<void> => {
       return;
     }
   }
-  const result = await db.transaction(async (tx) => {
-    const [account] = await tx
-      .select()
-      .from(tradingAccountsTable)
-      .where(eq(tradingAccountsTable.userId, userId))
-      .limit(1)
-      .for("update");
-    if (
-      account?.state === "running" &&
-      account.activeStrategyId === params.data.id &&
-      body.data.active !== false
-    ) {
-      return { kind: "running" as const };
-    }
-    const [existing] = await tx
-      .select({ id: strategiesTable.id })
-      .from(strategiesTable)
-      .where(
-        and(
-          eq(strategiesTable.id, params.data.id),
-          eq(strategiesTable.userId, userId),
-        ),
-      )
-      .limit(1)
-      .for("update");
-    if (!existing) return { kind: "missing" as const };
-    if (body.data.active === true) {
-      await tx
-        .update(strategiesTable)
-        .set({ active: false, updatedAt: new Date() })
-        .where(eq(strategiesTable.userId, userId));
-    }
-    const [updated] = await tx
-      .update(strategiesTable)
-      .set({ ...body.data, updatedAt: new Date() })
-      .where(
-        and(
-          eq(strategiesTable.id, params.data.id),
-          eq(strategiesTable.userId, userId),
-        ),
-      )
-      .returning();
-    if (!updated) return { kind: "missing" as const };
 
-    if (body.data.active === true) {
-      await tx
-        .update(tradingAccountsTable)
-        .set({
-          activeStrategyId: updated.id,
-          state: "stopped",
-          updatedAt: new Date(),
-        })
-        .where(eq(tradingAccountsTable.userId, userId));
-    } else if (body.data.active === false) {
-      await tx
-        .update(tradingAccountsTable)
-        .set({
-          activeStrategyId: null,
-          state: "stopped",
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(tradingAccountsTable.userId, userId),
-            eq(tradingAccountsTable.activeStrategyId, updated.id),
-          ),
-        );
-    }
-    return { kind: "updated" as const, strategy: updated };
-  });
-  if (result.kind === "running") {
+  const account = await accounts.findByUser(userId);
+  if (
+    account?.state === "running" &&
+    account.activeStrategyId === params.data.id &&
+    body.data.active !== false
+  ) {
     res.status(409).json({ error: "Stop paper trading before editing its active strategy." });
     return;
   }
-  if (result.kind === "missing") {
+  const existing = await strategies.findOne(params.data.id, userId);
+  if (!existing) {
     res.status(404).json({ error: "Strategy not found." });
     return;
   }
-  res.json(UpdateStrategyResponse.parse(serializeStrategy(result.strategy)));
+  if (body.data.active === true) {
+    await strategies.deactivateAll(userId);
+  }
+  const updated = await strategies.update(params.data.id, userId, {
+    ...body.data,
+    updatedAt: new Date(),
+  });
+  if (!updated) {
+    res.status(404).json({ error: "Strategy not found." });
+    return;
+  }
+  if (body.data.active === true) {
+    await accounts.update(userId, {
+      activeStrategyId: updated.id,
+      state: "stopped",
+      updatedAt: new Date(),
+    });
+  } else if (body.data.active === false) {
+    await accounts.clearActiveStrategy(userId, updated.id);
+  }
+  res.json(UpdateStrategyResponse.parse(serializeStrategy(updated)));
 });
 
 export default router;

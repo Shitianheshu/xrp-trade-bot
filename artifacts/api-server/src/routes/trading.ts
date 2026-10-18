@@ -1,4 +1,3 @@
-import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { Router, type IRouter } from "express";
 import {
   EmergencyStopTradingResponse,
@@ -21,13 +20,18 @@ import {
   StopPaperTradingResponse,
 } from "@workspace/api-zod";
 import {
-  db,
-  paperOrdersTable,
-  paperPositionsTable,
-  paperTradesTable,
-  strategiesTable,
-  tradingAccountsTable,
-  tradingSignalsTable,
+  accounts,
+  orders,
+  pingDatabase,
+  positions,
+  signals,
+  strategies,
+  trades,
+  type PaperOrder,
+  type PaperPosition,
+  type PaperTrade,
+  type StrategyRecord,
+  type TradingSignal,
 } from "@workspace/db";
 import { authenticatedUserId, requireAuth } from "../middlewares/require-auth";
 import { getExchangeAdapter } from "../lib/market-data";
@@ -36,6 +40,10 @@ import {
 } from "../lib/trading-store";
 import {
   getTradingStatus,
+  closeManualPaperPositions,
+  placePaperBuyForQuote,
+  readVirtualStake,
+  setVirtualStake,
   startPaperTrading,
   stopPaperTrading,
 } from "../lib/paper-engine";
@@ -44,7 +52,7 @@ import { logger } from "../lib/logger";
 const router: IRouter = Router();
 router.use(requireAuth);
 
-function serializeStrategy(strategy: typeof strategiesTable.$inferSelect | null) {
+function serializeStrategy(strategy: StrategyRecord | null) {
   if (!strategy) return null;
   return {
     ...strategy,
@@ -53,10 +61,7 @@ function serializeStrategy(strategy: typeof strategiesTable.$inferSelect | null)
   };
 }
 
-function serializePosition(
-  position: typeof paperPositionsTable.$inferSelect,
-  markPrice: number,
-) {
+function serializePosition(position: PaperPosition, markPrice: number) {
   const marketValue = position.quantity * markPrice;
   const pnl = (markPrice - position.entryPrice) * position.quantity - position.entryFee;
   return {
@@ -78,7 +83,7 @@ function serializePosition(
   };
 }
 
-function serializeOrder(order: typeof paperOrdersTable.$inferSelect) {
+function serializeOrder(order: PaperOrder) {
   return {
     id: order.id,
     clientOrderId: order.clientOrderId,
@@ -94,7 +99,7 @@ function serializeOrder(order: typeof paperOrdersTable.$inferSelect) {
   };
 }
 
-function serializeTrade(trade: typeof paperTradesTable.$inferSelect) {
+function serializeTrade(trade: PaperTrade) {
   return {
     id: trade.id,
     symbol: trade.symbol,
@@ -112,7 +117,7 @@ function serializeTrade(trade: typeof paperTradesTable.$inferSelect) {
   };
 }
 
-function serializeSignal(signal: typeof tradingSignalsTable.$inferSelect) {
+function serializeSignal(signal: TradingSignal) {
   return {
     id: signal.id,
     symbol: signal.symbol,
@@ -128,41 +133,21 @@ function serializeSignal(signal: typeof tradingSignalsTable.$inferSelect) {
 }
 
 async function loadMarkedPositions(userId: string) {
-  const positions = await db
-    .select()
-    .from(paperPositionsTable)
-    .where(eq(paperPositionsTable.userId, userId))
-    .orderBy(desc(paperPositionsTable.openedAt));
+  const open = await positions.list(userId);
   const adapter = getExchangeAdapter();
   const tickers = new Map<string, number>();
-  for (const position of positions) {
+  for (const position of open) {
     if (!tickers.has(position.symbol)) {
       tickers.set(position.symbol, (await adapter.ticker(position.symbol)).price);
     }
   }
-  return positions.map((position) =>
+  return open.map((position) =>
     serializePosition(position, tickers.get(position.symbol) ?? position.entryPrice),
   );
 }
 
 async function aggregateTrades(userId: string, today: Date) {
-  const [totals] = await db
-    .select({
-      totalTrades: sql<number>`count(*)`.mapWith(Number),
-      winningTrades: sql<number>`count(*) filter (where ${paperTradesTable.netPnl} > 0)`.mapWith(Number),
-      realizedPnl: sql<number>`coalesce(sum(${paperTradesTable.netPnl}), 0)`.mapWith(Number),
-      realizedToday: sql<number>`coalesce(sum(case when ${paperTradesTable.closedAt} >= ${today} then ${paperTradesTable.netPnl} else 0 end), 0)`.mapWith(Number),
-      feesPaid: sql<number>`coalesce(sum(${paperTradesTable.fees}), 0)`.mapWith(Number),
-    })
-    .from(paperTradesTable)
-    .where(eq(paperTradesTable.userId, userId));
-  return totals ?? {
-    totalTrades: 0,
-    winningTrades: 0,
-    realizedPnl: 0,
-    realizedToday: 0,
-    feesPaid: 0,
-  };
+  return trades.summarize(userId, today);
 }
 
 async function buildPortfolio(userId: string) {
@@ -212,20 +197,14 @@ async function getRiskSettings(userId: string) {
 router.get("/dashboard", async (_req, res): Promise<void> => {
   const userId = authenticatedUserId(res);
   const { account } = await ensureUserAccount(userId);
-  const [ticker, portfolio, orders, trades, signals, strategy] = await Promise.all([
+  const [ticker, portfolio, recentOrders, recentTrades, recentSignals, strategy] = await Promise.all([
     getExchangeAdapter().ticker(process.env.TRADING_SYMBOL ?? "XRP/USDT"),
     buildPortfolio(userId),
-    db.select().from(paperOrdersTable).where(eq(paperOrdersTable.userId, userId))
-      .orderBy(desc(paperOrdersTable.createdAt)).limit(6),
-    db.select().from(paperTradesTable).where(eq(paperTradesTable.userId, userId))
-      .orderBy(desc(paperTradesTable.closedAt)).limit(6),
-    db.select().from(tradingSignalsTable).where(eq(tradingSignalsTable.userId, userId))
-      .orderBy(desc(tradingSignalsTable.createdAt)).limit(6),
+    orders.list(userId, 6),
+    trades.list(userId, 6),
+    signals.list(userId, 6),
     account.activeStrategyId
-      ? db.select().from(strategiesTable).where(and(
-          eq(strategiesTable.id, account.activeStrategyId),
-          eq(strategiesTable.userId, userId),
-        )).limit(1).then((rows) => rows[0] ?? null)
+      ? strategies.findOne(account.activeStrategyId, userId)
       : Promise.resolve(null),
   ]);
   const today = new Date();
@@ -245,8 +224,8 @@ router.get("/dashboard", async (_req, res): Promise<void> => {
         : 0,
     },
     activeStrategy: serializeStrategy(strategy),
-    recentTrades: trades.map(serializeTrade),
-    recentSignals: signals.map(serializeSignal),
+    recentTrades: recentTrades.map(serializeTrade),
+    recentSignals: recentSignals.map(serializeSignal),
   };
   res.json(GetTradingDashboardResponse.parse(dashboard));
 });
@@ -267,13 +246,8 @@ router.get("/orders", async (req, res): Promise<void> => {
     res.status(400).json({ error: query.error.message });
     return;
   }
-  const orders = await db
-    .select()
-    .from(paperOrdersTable)
-    .where(eq(paperOrdersTable.userId, authenticatedUserId(res)))
-    .orderBy(desc(paperOrdersTable.createdAt))
-    .limit(query.data.limit);
-  res.json(GetOrdersResponse.parse(orders.map(serializeOrder)));
+  const rows = await orders.list(authenticatedUserId(res), query.data.limit);
+  res.json(GetOrdersResponse.parse(rows.map(serializeOrder)));
 });
 
 router.get("/trades", async (req, res): Promise<void> => {
@@ -282,13 +256,8 @@ router.get("/trades", async (req, res): Promise<void> => {
     res.status(400).json({ error: query.error.message });
     return;
   }
-  const trades = await db
-    .select()
-    .from(paperTradesTable)
-    .where(eq(paperTradesTable.userId, authenticatedUserId(res)))
-    .orderBy(desc(paperTradesTable.closedAt))
-    .limit(query.data.limit);
-  res.json(GetTradesResponse.parse(trades.map(serializeTrade)));
+  const rows = await trades.list(authenticatedUserId(res), query.data.limit);
+  res.json(GetTradesResponse.parse(rows.map(serializeTrade)));
 });
 
 router.get("/signals", async (req, res): Promise<void> => {
@@ -297,13 +266,8 @@ router.get("/signals", async (req, res): Promise<void> => {
     res.status(400).json({ error: query.error.message });
     return;
   }
-  const signals = await db
-    .select()
-    .from(tradingSignalsTable)
-    .where(eq(tradingSignalsTable.userId, authenticatedUserId(res)))
-    .orderBy(desc(tradingSignalsTable.createdAt))
-    .limit(query.data.limit);
-  res.json(GetSignalsResponse.parse(signals.map(serializeSignal)));
+  const rows = await signals.list(authenticatedUserId(res), query.data.limit);
+  res.json(GetSignalsResponse.parse(rows.map(serializeSignal)));
 });
 
 router.get("/trading/status", async (_req, res): Promise<void> => {
@@ -325,6 +289,47 @@ router.post("/trading/start", async (req, res): Promise<void> => {
       error: error instanceof Error ? error.message : "Paper trading could not start.",
     });
   }
+});
+
+router.post("/trading/paper-buy", async (req, res): Promise<void> => {
+  const spend = Number(req.body?.spend);
+  if (!Number.isFinite(spend)) {
+    res.status(400).json({ error: "Choose a paper spend in USDT." });
+    return;
+  }
+  const result = await placePaperBuyForQuote(authenticatedUserId(res), spend, `quote:${spend}:${Date.now()}`);
+  const message = typeof result === "string" ? result : result.message;
+  if (!message.startsWith("Bought")) {
+    res.status(409).json({ error: message });
+    return;
+  }
+  res.json(typeof result === "string" ? { message } : result);
+});
+
+router.get("/trading/virtual-stake", async (_req, res): Promise<void> => {
+  res.json(await readVirtualStake(authenticatedUserId(res)));
+});
+
+router.post("/trading/virtual-stake", async (req, res): Promise<void> => {
+  const amount = Number(req.body?.virtualXrp);
+  if (!Number.isFinite(amount) || amount <= 0 || amount > 1_000_000) {
+    res.status(400).json({ error: "Choose a virtual stake from 0.01 to 1000000 XRP." });
+    return;
+  }
+  res.json(await setVirtualStake(authenticatedUserId(res), amount));
+});
+
+router.post("/trading/paper-close", async (req, res): Promise<void> => {
+  const message = await closeManualPaperPositions(authenticatedUserId(res), `desk:${Date.now()}`);
+  if (!message.startsWith("Closed")) {
+    res.status(409).json({ error: message });
+    return;
+  }
+  const latest = (await trades.list(authenticatedUserId(res), 1))[0];
+  res.json({
+    message,
+    settlement: latest ? { netPnl: latest.netPnl, exitPrice: latest.exitPrice, quantity: latest.quantity } : null,
+  });
 });
 
 router.post("/trading/stop", async (_req, res): Promise<void> => {
@@ -355,10 +360,7 @@ router.put("/risk/settings", async (req, res): Promise<void> => {
     res.status(409).json({ error: "Stop paper trading before changing risk limits." });
     return;
   }
-  await db
-    .update(tradingAccountsTable)
-    .set({ ...body.data, updatedAt: new Date() })
-    .where(eq(tradingAccountsTable.userId, userId));
+  await accounts.update(userId, { ...body.data, updatedAt: new Date() });
   const updated = await getRiskSettings(userId);
   res.json(UpdateRiskSettingsResponse.parse(updated));
 });
@@ -393,12 +395,12 @@ router.get("/paper-validation", async (_req, res): Promise<void> => {
     });
   }
   try {
-    await db.execute(sql`select 1`);
+    await pingDatabase();
     checks.push({
       id: "database",
       label: "Persistent storage",
       status: "passed",
-      detail: "Paper account, orders, positions and trades are stored in PostgreSQL.",
+      detail: "Paper account, orders, positions and trades are stored in MongoDB.",
     });
   } catch {
     checks.push({

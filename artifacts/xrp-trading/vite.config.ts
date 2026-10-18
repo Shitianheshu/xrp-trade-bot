@@ -69,6 +69,16 @@ export default defineConfig({
     strictPort: true,
     host: '0.0.0.0',
     allowedHosts: true,
+    proxy: {
+      '/api': {
+        // Port 5000 is often already taken on this machine, so ignore a stale target.
+        target: process.env.API_PROXY_TARGET?.includes(':5000')
+          ? 'http://127.0.0.1:5050'
+          : (process.env.API_PROXY_TARGET ?? 'http://127.0.0.1:5050'),
+        changeOrigin: true,
+        ws: true,
+      },
+    },
     fs: {
       strict: true,
     },

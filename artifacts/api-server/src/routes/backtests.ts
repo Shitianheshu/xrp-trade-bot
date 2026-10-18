@@ -1,4 +1,3 @@
-import { and, desc, eq, sql } from "drizzle-orm";
 import { Router, type IRouter } from "express";
 import {
   GetBacktestParams,
@@ -7,12 +6,7 @@ import {
   RunBacktestBody,
   RunBacktestResponse,
 } from "@workspace/api-zod";
-import {
-  backtestsTable,
-  db,
-  marketCandlesTable,
-  strategiesTable,
-} from "@workspace/db";
+import { backtests, candles, strategies, type BacktestRecord } from "@workspace/db";
 import { authenticatedUserId, requireAuth } from "../middlewares/require-auth";
 import { getExchangeAdapter, MarketDataError } from "../lib/market-data";
 import { runBacktest, type BacktestResult } from "../lib/trading-math";
@@ -30,7 +24,7 @@ const candlesPerDay: Record<string, number> = {
   "1d": 1,
 };
 
-function serializeRecord(record: typeof backtestsTable.$inferSelect) {
+function serializeRecord(record: BacktestRecord) {
   const result = record.result as BacktestResult;
   return {
     ...result,
@@ -43,12 +37,7 @@ function serializeRecord(record: typeof backtestsTable.$inferSelect) {
 }
 
 router.get("/backtests", async (_req, res): Promise<void> => {
-  const records = await db
-    .select()
-    .from(backtestsTable)
-    .where(eq(backtestsTable.userId, authenticatedUserId(res)))
-    .orderBy(desc(backtestsTable.createdAt))
-    .limit(50);
+  const records = await backtests.list(authenticatedUserId(res), 50);
   res.json(
     GetBacktestsResponse.parse(
       records.map((record) => {
@@ -87,69 +76,48 @@ router.post("/backtests", async (req, res): Promise<void> => {
     });
     return;
   }
-  const [strategy] = await db
-    .select()
-    .from(strategiesTable)
-    .where(
-      and(
-        eq(strategiesTable.id, strategyId),
-        eq(strategiesTable.userId, userId),
-      ),
-    )
-    .limit(1);
+  const strategy = await strategies.findOne(strategyId, userId);
   if (!strategy) {
     res.status(404).json({ error: "Strategy not found." });
     return;
   }
   try {
     const adapter = getExchangeAdapter();
-    const candles = await adapter.history(
+    const history = await adapter.history(
       symbol,
       interval,
       Date.now() - days * 86_400_000,
     );
-    if (candles.length < Math.max(strategy.params.slowEma, 30) + 5) {
+    if (history.length < Math.max(strategy.params.slowEma, 30) + 5) {
       res.status(502).json({
         error: "Exchange returned too few complete candles for a meaningful backtest.",
       });
       return;
     }
-    for (let offset = 0; offset < candles.length; offset += 500) {
-      const batch = candles.slice(offset, offset + 500);
-      await db
-        .insert(marketCandlesTable)
-        .values(
-          batch.map((candle) => ({
-            exchange: adapter.id,
-            symbol,
-            interval,
-            time: new Date(candle.time),
-            open: candle.open,
-            high: candle.high,
-            low: candle.low,
-            close: candle.close,
-            volume: candle.volume,
-          })),
-        )
-        .onConflictDoUpdate({
-          target: [
-            marketCandlesTable.exchange,
-            marketCandlesTable.symbol,
-            marketCandlesTable.interval,
-            marketCandlesTable.time,
-          ],
-          set: {
-            open: sql`excluded.open`,
-            high: sql`excluded.high`,
-            low: sql`excluded.low`,
-            close: sql`excluded.close`,
-            volume: sql`excluded.volume`,
-          },
-        });
+    for (let offset = 0; offset < history.length; offset += 500) {
+      const batch = history.slice(offset, offset + 500);
+      await candles.upsertMany(
+        batch.map((candle) => ({
+          exchange: adapter.id,
+          symbol,
+          interval,
+          time: new Date(candle.time),
+          open: candle.open,
+          high: candle.high,
+          low: candle.low,
+          close: candle.close,
+          volume: candle.volume,
+        })),
+      );
     }
 
+    const startingXrp = Number((req.body as { startingXrp?: unknown } | undefined)?.startingXrp);
+    const firstClose = history[0]?.close ?? 0;
+    const capital = Number.isFinite(startingXrp) && startingXrp > 0 && startingXrp <= 1_000_000 && firstClose > 0
+      ? startingXrp * firstClose
+      : initialCapital;
     const metrics = runBacktest(
-      candles,
+      history,
       {
         type: strategy.type as "ema_crossover" | "rsi_reversion" | "macd" | "bollinger" | "combined",
         params: strategy.params,
@@ -158,24 +126,19 @@ router.post("/backtests", async (req, res): Promise<void> => {
         trailingStopPct: strategy.trailingStopPct,
         minConfidence: strategy.minConfidence,
       },
-      initialCapital,
+      capital,
       feeBps,
       slippageBps,
     );
-    const [record] = await db
-      .insert(backtestsTable)
-      .values({
-        userId,
-        symbol,
-        interval,
-        strategyName: strategy.name,
-        request: body.data,
-        result: metrics,
-      })
-      .returning();
-    res.status(201).json(
-      RunBacktestResponse.parse(serializeRecord(record)),
-    );
+    const record = await backtests.insert({
+      userId,
+      symbol,
+      interval,
+      strategyName: strategy.name,
+      request: body.data,
+      result: metrics,
+    });
+    res.status(201).json(RunBacktestResponse.parse(serializeRecord(record)));
   } catch (error) {
     logger.warn({ err: error, symbol, interval }, "Backtest data request failed");
     res.status(error instanceof MarketDataError ? error.status : 502).json({
@@ -192,16 +155,7 @@ router.get("/backtests/:id", async (req, res): Promise<void> => {
     res.status(400).json({ error: params.error.message });
     return;
   }
-  const [record] = await db
-    .select()
-    .from(backtestsTable)
-    .where(
-      and(
-        eq(backtestsTable.id, params.data.id),
-        eq(backtestsTable.userId, authenticatedUserId(res)),
-      ),
-    )
-    .limit(1);
+  const record = await backtests.findOne(params.data.id, authenticatedUserId(res));
   if (!record) {
     res.status(404).json({ error: "Backtest not found." });
     return;

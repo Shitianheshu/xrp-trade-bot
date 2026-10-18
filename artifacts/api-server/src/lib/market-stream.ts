@@ -5,6 +5,7 @@ import {
   type RawData,
 } from "ws";
 import { logger } from "./logger";
+import { handleTankUpgrade } from "./tank-arena";
 
 const streamServer = new WebSocketServer({ noServer: true, maxPayload: 1024 });
 const MAX_CLIENTS = 100;
@@ -44,13 +45,17 @@ function parseTicker(raw: RawData, symbol: string) {
   };
 }
 
-export function installMarketStream(server: Server): void {
+export function installRealtime(server: Server): void {
   server.on("upgrade", (request, socket, head) => {
     let url: URL;
     try {
       url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     } catch {
       socket.destroy();
+      return;
+    }
+    if (url.pathname === "/api/game/tank/live") {
+      handleTankUpgrade(request, socket, head, url);
       return;
     }
     if (url.pathname !== "/api/stream") {
@@ -128,14 +133,21 @@ export function installMarketStream(server: Server): void {
       });
     };
 
+    const pump = setInterval(() => {
+      if (disposed || client.readyState !== WebSocket.OPEN) return;
+      if (!upstream && !retryTimer) connect();
+    }, 1_000);
+
     client.on("close", () => {
       disposed = true;
+      clearInterval(pump);
       if (retryTimer) clearTimeout(retryTimer);
       upstream?.close();
       releaseClientSlot();
     });
     client.on("error", () => {
       disposed = true;
+      clearInterval(pump);
       if (retryTimer) clearTimeout(retryTimer);
       upstream?.terminate();
       releaseClientSlot();

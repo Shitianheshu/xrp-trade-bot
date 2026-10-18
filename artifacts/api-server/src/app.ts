@@ -13,6 +13,7 @@ import {
   getClerkProxyHost,
 } from "./middlewares/clerkProxyMiddleware";
 import { apiRateLimit } from "./middlewares/rate-limit";
+import { clerkConfigured } from "./middlewares/require-auth";
 import router from "./routes";
 import { logger } from "./lib/logger";
 
@@ -44,18 +45,24 @@ app.use(
 );
 
 // Keep the Clerk proxy before parsers so OAuth requests retain their raw body.
-app.use(CLERK_PROXY_PATH, clerkProxyMiddleware());
+if (clerkConfigured()) {
+  app.use(CLERK_PROXY_PATH, clerkProxyMiddleware());
+}
 app.use(express.json({ limit: "64kb" }));
 app.use(express.urlencoded({ extended: true, limit: "64kb" }));
 
-app.use(
-  clerkMiddleware((req) => ({
-    publishableKey: publishableKeyFromHost(
-      getClerkProxyHost(req) ?? "",
-      process.env.CLERK_PUBLISHABLE_KEY,
-    ),
-  })),
-);
+if (clerkConfigured()) {
+  app.use(
+    clerkMiddleware((req) => ({
+      publishableKey: publishableKeyFromHost(
+        getClerkProxyHost(req) ?? "",
+        process.env.CLERK_PUBLISHABLE_KEY,
+      ),
+    })),
+  );
+} else {
+  logger.warn("Clerk keys are not set. API requests use the local demo account.");
+}
 
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");

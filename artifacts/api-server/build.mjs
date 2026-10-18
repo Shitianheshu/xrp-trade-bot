@@ -48,6 +48,7 @@ async function buildAll() {
       "lightningcss",
       "pg-native",
       "oracledb",
+      "mongodb",
       "mongodb-client-encryption",
       "nodemailer",
       "handlebars",

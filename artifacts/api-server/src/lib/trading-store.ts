@@ -1,11 +1,10 @@
-import { and, desc, eq } from "drizzle-orm";
 import {
-  db,
-  paperPositionsTable,
-  strategiesTable,
-  tradingAccountsTable,
+  accounts,
+  strategies,
+  type StrategyParameters,
+  type StrategyRecord,
+  type TradingAccount,
 } from "@workspace/db";
-import type { StrategyParameters } from "@workspace/db";
 
 export const DEFAULT_PARAMS: StrategyParameters = {
   fastEma: 12,
@@ -20,98 +19,43 @@ export const DEFAULT_PARAMS: StrategyParameters = {
   bollingerStdDev: 2,
 };
 
-export async function ensureUserAccount(userId: string) {
-  let [account] = await db
-    .select()
-    .from(tradingAccountsTable)
-    .where(eq(tradingAccountsTable.userId, userId))
-    .limit(1);
-
+export async function ensureUserAccount(userId: string): Promise<{ account: TradingAccount; strategy: StrategyRecord }> {
+  let account = await accounts.findByUser(userId);
   if (!account) {
-    [account] = await db
-      .insert(tradingAccountsTable)
-      .values({ userId })
-      .onConflictDoNothing()
-      .returning();
-    if (!account) {
-      [account] = await db
-        .select()
-        .from(tradingAccountsTable)
-        .where(eq(tradingAccountsTable.userId, userId))
-        .limit(1);
-    }
+    account = await accounts.insert(userId);
+    account ??= await accounts.findByUser(userId);
   }
   if (!account) throw new Error("Unable to initialize the paper account.");
 
-  let [strategy] = await db
-    .select()
-    .from(strategiesTable)
-    .where(
-      and(
-        eq(strategiesTable.userId, userId),
-        eq(strategiesTable.name, "Baseline XRP strategy"),
-      ),
-    )
-    .limit(1);
-
+  let strategy = await strategies.findByName(userId, "Baseline XRP strategy");
   if (!strategy) {
-    [strategy] = await db
-      .insert(strategiesTable)
-      .values({
-        userId,
-        name: "Baseline XRP strategy",
-        symbol: process.env.TRADING_SYMBOL ?? "XRP/USDT",
-        interval: "1h",
-        type: "combined",
-        params: DEFAULT_PARAMS,
-        stopLossPct: 2,
-        takeProfitPct: 4,
-        trailingStopPct: null,
-        maxPositionPct: 10,
-        maxDailyLossPct: 3,
-        maxTradesPerDay: 20,
-        cooldownSeconds: 300,
-        minConfidence: 0.65,
-        active: true,
-      })
-      .onConflictDoNothing()
-      .returning();
-    if (!strategy) {
-      [strategy] = await db
-        .select()
-        .from(strategiesTable)
-        .where(
-          and(
-            eq(strategiesTable.userId, userId),
-            eq(strategiesTable.name, "Baseline XRP strategy"),
-          ),
-        )
-        .limit(1);
-    }
+    strategy = await strategies.insert({
+      userId,
+      name: "Baseline XRP strategy",
+      symbol: process.env.TRADING_SYMBOL ?? "XRP/USDT",
+      interval: "1h",
+      type: "combined",
+      params: DEFAULT_PARAMS,
+      stopLossPct: 2,
+      takeProfitPct: 4,
+      trailingStopPct: null,
+      maxPositionPct: 10,
+      maxDailyLossPct: 3,
+      maxTradesPerDay: 20,
+      cooldownSeconds: 300,
+      minConfidence: 0.65,
+      active: true,
+    });
+    strategy ??= await strategies.findByName(userId, "Baseline XRP strategy");
   }
   if (!strategy) throw new Error("Unable to initialize the baseline strategy.");
 
   if (!account.activeStrategyId) {
-    await db
-      .update(tradingAccountsTable)
-      .set({ activeStrategyId: strategy.id, updatedAt: new Date() })
-      .where(eq(tradingAccountsTable.userId, userId));
-    [account] = await db
-      .select()
-      .from(tradingAccountsTable)
-      .where(eq(tradingAccountsTable.userId, userId))
-      .limit(1);
+    await accounts.update(userId, { activeStrategyId: strategy.id, updatedAt: new Date() });
+    account = await accounts.findByUser(userId);
   }
   if (!account) throw new Error("Unable to load the paper account.");
   return { account, strategy };
-}
-
-export async function listOpenPositions(userId: string) {
-  return db
-    .select()
-    .from(paperPositionsTable)
-    .where(eq(paperPositionsTable.userId, userId))
-    .orderBy(desc(paperPositionsTable.openedAt));
 }
 
 export function iso(value: Date | string | null): string | null {
